@@ -1,0 +1,180 @@
+---
+title: "Reversal Trading Model(Lower-band & IBS) by Scott Lee"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: scroll
+    theme: 
+      version: 4
+      bootswatch: minty
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+library(quantmod)
+library(PerformanceAnalytics)
+library(zoo)
+library(TTR)
+library(writexl)
+library(DT)
+```
+
+# Sidebar {.sidebar data-width="350"}
+```{r}
+selectInput("ticker", "Select ETF:", 
+            choices = c("QQQ","SPY","IWM","EFA","EEM", "EWY"), 
+            selected = "QQQ")
+
+get_strategy_data <- function(ticker) {
+  x <- getSymbols(ticker, from = "2000-01-01", auto.assign = FALSE)
+  H <- Hi(x); L <- Lo(x); C <- Cl(x); Adj <- Ad(x)
+  
+  HL      <- H - L
+  rollHL  <- rollapplyr(HL, 25, mean,  fill = NA, align = "right") 
+  rangeHL <- ifelse(HL == 0, NA, HL)
+  IBS     <- (C - L) / rangeHL
+  rollH10 <- rollapplyr(H, 10, max, fill = NA, align = "right")
+  lower   <- rollH10 - 2.5 * rollHL
+  
+  entry_signal <- ifelse((C < lower) & (IBS < 0.3), 1L, 0L)
+  entry_signal[is.na(entry_signal)] <- 0L
+  exit_signal  <- ifelse(C > lag(H, 1, na.pad = TRUE), -1L, 0L)
+  exit_signal[is.na(exit_signal)] <- 0L
+  
+  position <- xts(rep(0L, NROW(C)), order.by = index(C))
+  for (i in 2:NROW(C)) {
+    if (as.numeric(position[i-1]) == 0L) {
+      if (entry_signal[i] == 1L) position[i] <- 1L else position[i] <- 0L
+    } else {
+      if (exit_signal[i] == -1L) position[i] <- 0L else position[i] <- 1L
+    }
+  }
+  
+  ret <- dailyReturn(Adj)
+  strategy_ret <- ret * lag(position, 1)
+  strategy_ret[is.na(strategy_ret)] <- 0
+  perf <- cbind(`Strategy` = strategy_ret, `Buy&Hold` = ret)
+  colnames(perf) <- c(paste0(ticker, "_전략"), ticker)
+  
+  trades <- data.frame(
+    Date = index(C),
+    Close = as.numeric(C),
+    Entry = entry_signal,
+    Exit  = exit_signal,
+    Position = as.numeric(position),
+    StrategyReturn = as.numeric(strategy_ret)   # 전략 수익률 추가
+  )
+  
+  colnames(trades) <- c("Date", "Close", "EntrySignal", "ExitSignal", "Position", "StrategyReturn")
+  
+  list(perf = perf, trades = trades)
+}
+
+```
+
+# **Trading Strategy Simulation**
+
+## Row {data-height="400"}
+
+### **Cumulative Performance** {.column data-width=700} 
+
+
+```{r}
+renderPlot({
+  req(input$ticker)                     # 반드시 ticker 값이 있어야 실행
+  data <- get_strategy_data(input$ticker)
+  charts.PerformanceSummary(
+    data$perf,
+    legend.loc = "topleft",
+    main = paste0(input$ticker, ": Lower-band + IBS Strategy")
+  )
+})
+```
+
+### **Performance Summary**
+
+```{r}
+renderDataTable({
+  req(input$ticker)
+  data <- get_strategy_data(input$ticker)
+  
+  # 1) Annualized Returns 계산 + Max Drawdown 추가
+  perf_summary <- table.AnnualizedReturns(data$perf, Rf = 0)
+  maxDD <- apply(data$perf, 2, maxDrawdown)
+  perf_summary <- rbind(perf_summary, `Max Drawdown` = maxDD)
+  
+  # 2) data.frame 변환
+  perf_tbl <- as.data.frame(perf_summary, stringsAsFactors = FALSE)
+  perf_tbl$Metric <- rownames(perf_summary)
+  rownames(perf_tbl) <- NULL
+  
+  # 3) 퍼센트 변환할 컬럼들 지정
+  numeric_cols <- setdiff(colnames(perf_tbl), "Metric")
+  pct_rows <- c("Annualized Return", "Annualized Std Dev", "Max Drawdown")
+  
+  # 4) 벡터화된 변환
+  for(col in numeric_cols){
+    perf_tbl[[col]] <- ifelse(
+      perf_tbl$Metric %in% pct_rows,
+      paste0(format(round(as.numeric(perf_tbl[[col]])*100, 2), nsmall=2), "%"),
+      ifelse(perf_tbl$Metric == "Annualized Sharpe (Rf=0%)",
+             format(round(as.numeric(perf_tbl[[col]]), 2), nsmall=2),
+             perf_tbl[[col]]
+      )
+    )
+  }
+  
+  # 5) Metric 열 맨 앞으로 이동
+  perf_tbl <- perf_tbl[, c("Metric", numeric_cols)]
+  
+  # 6) DT 출력 (Metric 열 이름 제거)
+  datatable(
+    perf_tbl,
+    options = list(pageLength = 10, dom='t', autoWidth=TRUE),
+    rownames = FALSE,
+    colnames = c("", numeric_cols),  # Metric 열 이름 공백 처리
+    escape = FALSE
+  ) %>%
+    formatStyle(
+      columns = colnames(perf_tbl),
+      'text-align' = 'center',
+      fontSize = '85%'
+    )
+})
+
+```
+
+## Row {.tabset .tabset-fade}
+
+### **Trades Log**
+
+```{r}
+renderDataTable({
+  req(input$ticker)
+  data <- get_strategy_data(input$ticker)
+
+  datatable(
+    data$trades[order(data$trades$Date, decreasing = TRUE), ],  # 최근일자부터
+    options = list(
+      pageLength = 1000,
+      dom = 'tip',          # 불필요한 버튼 최소화
+      autoWidth = TRUE
+    ),
+    rownames = FALSE
+  ) %>%
+    formatStyle(
+      columns = names(data$trades),
+      fontSize = '85%',      # 글씨 크기 줄이기 (예: 85%)
+      'text-align' = 'center'  # 가운데 정렬
+    ) %>% 
+    formatRound(
+      columns = c("Close", "StrategyReturn"),
+      digits = 2
+    ) %>% 
+    formatPercentage(
+      columns = c("StrategyReturn"),
+      digits = 2
+    )
+})
+
+```

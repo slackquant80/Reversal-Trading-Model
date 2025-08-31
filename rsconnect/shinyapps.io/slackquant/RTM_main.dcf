@@ -1,0 +1,10 @@
+name: RTM_main
+title:
+username: slackquant
+account: slackquant
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 15311418
+bundleId: 10841277
+url: https://slackquant.shinyapps.io/RTM_main/
+version: 1
